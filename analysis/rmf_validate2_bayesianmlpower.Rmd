@@ -1,0 +1,277 @@
+---
+title: "Motive Strength Measure: Validation Study 2 (Bayesian Multilevel 'Power' Analysis)"
+date: "August 22, 2019"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+header-includes:
+   - \usepackage[utf8]{inputenc}
+   - \DeclareUnicodeCharacter{2588}{-}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+knitr::opts_knit$set(root.dir = normalizePath('../'))
+options(scipen = 999)
+```
+
+# Load Libraries and Themes
+
+```{r libs}
+# devtools::install_github("debruine/faux") # To install faux package used below (not yet available on CRAN)
+
+library(knitr) # Required for knitting
+library(tidyverse) # Required for data cleaning
+library(brms) # Required for Bayesian multilevel models
+library(broom) # Required to extract random effects from Bayesian models
+library(rstanarm) # Required to examine model fit
+library(bayesplot) # Required to visualize posteriors
+library(loo) # Required to examine model fit
+library(pwr) # Required for basic power analysis
+library(faux) # Required to simulate data for correlated variables
+library(beepr) # Required to play tone at end of long analysis (e.g., multilevel power analysis)
+
+# mytheme = theme_minimal(base_size = 16) + 
+#     theme(legend.position = 'none',
+#           panel.grid.minor = element_blank(),
+#           panel.grid.major = element_blank(),
+#           plot.background = element_rect(fill = "white", color = NA),
+#           panel.background = element_rect(fill = "white", color = NA),
+#           strip.text.x = element_blank(),
+#           panel.margin = unit(0.1, "cm"),
+#           panel.border = element_rect(color="black", fill=NA),
+#           text = element_text(family="Helvetica", size=12),
+#           axis.text.x = element_text(size=8, margin=unit(c(2,0,0,0), "mm")),
+#           axis.text.y = element_text(size=8, margin=unit(c(0,2,0,0), "mm")),
+#           axis.ticks = element_line(size = .3),
+#           axis.ticks.length=unit(-1, "mm"))
+#theme_set(mytheme)
+
+mythemeweb = theme_classic(base_size = 16) +
+    theme(legend.position = 'none',
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank(),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          panel.background = element_rect(fill = "transparent", color = NA),
+          strip.text.x = element_blank(),
+          panel.margin = unit(0.1, "cm"),
+          panel.border = element_rect(color="black", fill=NA),
+          text = element_text(family="Helvetica", size=17),
+          axis.text.x = element_text(size=12, margin=unit(c(5,0,2,0), "mm")),
+          axis.text.y = element_text(size=12, margin=unit(c(0,5,0,0), "mm")),
+          axis.ticks = element_line(size = .5),
+          axis.ticks.length=unit(-2, "mm"))
+theme_set(mythemeweb)
+```
+
+# Load Cleaned Data and Create Subsets
+
+```{r load}
+load("data/mfv2_clean.RData")
+stimlist <- read.csv(file="data/stimlist5_190627.csv", header = TRUE)
+
+stimlist$stimtype <- factor(stimlist$stimtype, ordered = TRUE, levels = c("tgen", "ass", "cur", "cgen", "res", "loc", "gen"))
+stimlist$length <- nchar(as.character(stimlist$stim))
+stimlist$length.s <- as.numeric(scale(stimlist$length))
+stimlist$freq.s <- as.numeric(scale(stimlist$freq))
+
+### Subsets
+
+mf.rmf <- mf %>%
+  filter(stimtype == "ass" | stimtype == "cur" | stimtype == "res" | stimtype == "loc")
+
+mf.rmf.memboth <- mf.rmf %>%
+  filter(!is.na(logmemrank_promdom))
+```
+
+# Model of Interest
+
+## Promotion Strength, Prevention Strength, and Stimulus Regulatory Focus (and Interactions) Predicting Log-Adjusted Memory Rank
+
+```{r logmemrankb.rfstr.mlm}
+# set.seed(1234)
+# logmemrankb.promprev.str.mlm <- brm(logmemrank ~ rf.e * prom.strcs + rf.e * prev.strcs + freq.s + length.s + (freq.s + length.s | id) + (rf.e * prom.strcs + rf.e * prev.strcs | stim), data = mf.rmf, cores = 4, chains = 2)
+# save(logmemrankb.promprev.str.mlm, file = "models/logmemrankb.promprev.str.mlm.rda")
+load("models/logmemrankb.promprev.str.mlm.rda")
+summary(logmemrankb.promprev.str.mlm) # 95% CIs for interactions of interest do not cross 0; noteworthy heterogeneity
+# promstim x promstrength: b = .20
+# promstim x prevstrength: b = -.22
+```
+
+# Multilevel Bayesian Power Analyses
+
+```{r poweranalysis_mlm}
+# Overall method from here: https://solomonkurz.netlify.com/post/bayesian-power-analysis-part-i/
+# ...and data simulation method from here: https://debruine.github.io/tutorials/sim-lmer.html
+
+# For easy reference:
+# set.seed(1234)
+# logmemrankb.promprev.str.mlm <- brm(logmemrank ~ rf.e * prom.strcs + rf.e * prev.strcs + freq.s + length.s + (freq.s + length.s | id) + (rf.e * prom.strcs + rf.e * prev.strcs | stim), data = mf.rmf, cores = 4, chains = 2)
+# save(logmemrankb.promprev.str.mlm, file = "models/logmemrankb.promprev.str.mlm.rda")
+load("models/logmemrankb.promprev.str.mlm.rda")
+summary(logmemrankb.promprev.str.mlm)
+
+# CREATE A FUNCTION TO SIMULATE MULTILEVEL DATA
+## Version where we use model-determined effects to calculate logmemrank
+sim_d <- function(seed, n) {
+  
+  set.seed(seed)
+
+  sub_sd <- as.data.frame(VarCorr(logmemrankb.promprev.str.mlm)$id)["Intercept","sd.Estimate"] # SD for the subjects' random intercept
+  
+  mean_prom.strcs <- mean(mf.rmf$prom.strcs, na.rm = TRUE)
+  sd_prom.strcs <- sd(mf.rmf$prom.strcs, na.rm = TRUE)
+  mean_prev.strcs <- mean(mf.rmf$prev.strcs, na.rm = TRUE)
+  sd_prev.strcs <- sd(mf.rmf$prev.strcs, na.rm = TRUE)
+  
+  # Extract stimulus-specific random effects from model, merge to pull-in rf, length, and freq, and then generate new stimulus random intercepts based on mean/SD from original model
+  stim <- ranef(logmemrankb.promprev.str.mlm)$stim %>%
+    as_tibble(rownames = "stim")
+  stim <- merge(stim, stimsummary.rmf, by = "stim")
+  stim$stim_i = rnorm(nrow(stim), mean = stim$Estimate.Intercept, sd = stim$Est.Error.Intercept)
+  
+  # Specify intercept, fixed effects, and error based on model
+  grand_i <- fixef(logmemrankb.promprev.str.mlm)["Intercept","Estimate"]
+  prom_eff <- fixef(logmemrankb.promprev.str.mlm)["prom.strcs","Estimate"]
+  prev_eff <- fixef(logmemrankb.promprev.str.mlm)["prev.strcs","Estimate"]
+  rf_eff <- fixef(logmemrankb.promprev.str.mlm)["rf.e","Estimate"]
+  freq_eff <- fixef(logmemrankb.promprev.str.mlm)["freq.s","Estimate"]
+  length_eff <- fixef(logmemrankb.promprev.str.mlm)["length.s","Estimate"]
+  rf_prom_ixn <- fixef(logmemrankb.promprev.str.mlm)["rf.e:prom.strcs","Estimate"]
+  rf_prev_ixn <- fixef(logmemrankb.promprev.str.mlm)["rf.e:prev.strcs","Estimate"]
+  error_sd <- sd(residuals(logmemrankb.promprev.str.mlm))
+  
+  # Specify random slopes (SDs) and correlations of ID based on model
+  sub_freq_sd <- as.data.frame(VarCorr(logmemrankb.promprev.str.mlm)$id)["freq.s","sd.Estimate"]
+  sub_length_sd <- as.data.frame(VarCorr(logmemrankb.promprev.str.mlm)$id)["length.s","sd.Estimate"]
+  
+  sub_i_freq_cor <- as.data.frame(VarCorr(logmemrankb.promprev.str.mlm)$id)["freq.s","cor.Estimate.Intercept"]
+  sub_i_length_cor <- as.data.frame(VarCorr(logmemrankb.promprev.str.mlm)$id)["length.s","cor.Estimate.Intercept"]
+  sub_s_cor <- as.data.frame(VarCorr(logmemrankb.promprev.str.mlm)$id)["length.s","cor.Estimate.freq.s"]
+  
+  # Specify correlations for rnorm_multi for ID based on model
+  sub_cors_rownames = c("sub_i", "sub_freq", "sub_length")
+  sub_cors_colnames = c("sub_i", "sub_freq", "sub_length")
+  sub_cors <- matrix(c(1,sub_i_freq_cor,sub_i_length_cor,sub_i_freq_cor,1,sub_s_cor,sub_i_length_cor,sub_s_cor,1), nrow = 3, byrow = TRUE, dimnames = list(sub_cors_rownames, sub_cors_colnames))
+  
+  # Specify random slopes (SDs) and correlations for each stimulus based on model
+  stim$stim_rf <- rnorm(nrow(stim), mean = stim$Estimate.rf.e, sd = stim$Est.Error.rf.e)
+  stim$stim_prom <- rnorm(nrow(stim), mean = stim$Estimate.prom.strcs, sd = stim$Est.Error.prom.strcs)
+  stim$stim_prev <- rnorm(nrow(stim), mean = stim$Estimate.prev.strcs, sd = stim$Est.Error.prev.strcs)
+  stim$stim_rf_prom_ixn <- rnorm(nrow(stim), mean = stim$`Estimate.rf.e:prom.strcs`, sd = stim$`Est.Error.rf.e:prom.strcs`)
+  stim$stim_rf_prev_ixn <- rnorm(nrow(stim), mean = stim$`Estimate.rf.e:prev.strcs`, sd = stim$`Est.Error.rf.e:prev.strcs`)
+
+  promprev_cor <- cor.test(mfraw$prom.strcs, mfraw$prev.strcs)$estimate
+  
+  # Simulate subject-specific dataset of random effects
+  subraneffs <- rnorm_multi(
+    n = n,
+    vars = 3, 
+    r = sub_cors,
+    mu = c(0, 0, 0), # means of random intercepts and slopes are always 0
+    sd = c(sub_sd, sub_freq_sd, sub_length_sd),
+    varnames = c("sub_i", "sub_freq_slope", "sub_length_slope"),
+    empirical = TRUE) %>%
+    mutate(id = 1:n)
+  
+  # Simulate subject-specific promotion and prevention scores and merge with random effects
+  sub <- rnorm_multi(
+    n = n,
+    vars = 2, 
+    r = promprev_cor,
+    mu = c(mean_prom.strcs, mean_prev.strcs),
+    sd = c(sd_prom.strcs, sd_prev.strcs),
+    varnames = c("prom.strcs", "prev.strcs"),
+    empirical = TRUE) %>%
+    mutate(id = 1:n) %>%
+    left_join(subraneffs, by = "id")
+  
+  # Generate trials by creating stim x sub dataframe
+  trials <- expand.grid(
+      id = sub$id, # get subject IDs from the sub data table
+      stim = stim$stim # get stimulus IDs from the stim data table
+    ) %>%
+    left_join(sub, by = "id") # includes the intercept and condition for each subject
+  trials$stim <- as.character(trials$stim)
+  trials <- trials %>%
+    left_join(stim, by = "stim") # includes all stimulus-specific data
+  
+  # Simulate data
+  simdata <- trials %>%
+    mutate(
+      # effect-code subject condition and stimulus version
+      rf.e = dplyr::recode(rf, "prev" = -1, "prom" = +1),
+      # calculate error term (normally distributed residual with SD set above)
+      err = rnorm(nrow(.), 0, error_sd),
+      # calculate DV from intercepts, effects, and error
+      logmemrank = (grand_i + sub_i + stim_i + err) +
+         (prom.strcs * (prom_eff + stim_prom)) +
+         (prev.strcs * (prev_eff + stim_prev)) + 
+         (rf.e * (rf_eff + stim_rf)) + 
+         (freq.s * (freq_eff + sub_freq_slope)) +
+         (length.s * (length_eff + sub_length_slope)) +
+         (prom.strcs * rf.e * (rf_prom_ixn + stim_rf_prom_ixn)) +
+         (prev.strcs * rf.e * (rf_prev_ixn + stim_rf_prev_ixn))
+    ) %>%
+    as.tibble()
+  
+  # Generate missing logmemrank data
+  missingness <- 1 - mean(mf.rmf$mem.d) # 83% of data is missing
+  mcar <- runif(nrow(simdata), min = 0, max = 1)
+  countasmissing <- as.data.frame(ifelse(mcar < missingness, 0, 1)) %>%
+    rename(countasmissing = `ifelse(mcar < missingness, 0, 1)`)
+  simdata <- cbind(simdata, countasmissing)
+  simdata$logmemrank[simdata$countasmissing == 0] <- NA
+  simdata
+}
+
+# We’re going to be saving our simulation results in a nested data frame. Initially, it will have one column of seed values. These will serve a dual function. First, they are the values we’ll be feeding into the seed argument of our custom data-generating function, sim_d(). Second, since the seed values serially increase, they also stand in as iteration indexes.
+
+# For our second step, we add the data simulations and save them in a nested column, d. In the first argument of the purrr::map() function, we indicate we want to iterate over the values in seed. In the second argument, we indicate we want to serially plug those seed values into the first argument within the sim_d() function. That argument, recall, is the well-named seed argument. With the final argument in map(), we hard code the sample size into the n argument of sim_d().
+
+# For the third step, we expand our purrr::map() skills from above to purrr::map2(), which allows us to iteratively insert two arguments into a function. Within this paradigm, the two arguments are generically termed .x and .y. Thus our approach will be .x = d, .y = seed. For our function, we specify ~update(fit, newdata = .x, seed = .y). Thus we’ll be iteratively inserting our simulated d data into the newdata argument and will be simultaneously inserting our seed values into the seed argument.
+
+# Also notice that the number of iterations we’ll be working with is determined by the number of rows in the seed column. We are defining that number as n_sim. Since this is just a blog post, I’m going to take it easy and use 100. But if this was a real power analysis for one of your projects, something like 1000 would be better.
+
+# Define number of simulations to run and start time
+n_sim <- 100
+t1 <- Sys.time()
+
+# Rerun model n_sim many times
+powersims_125n_100sims <-
+  tibble(seed = 1:n_sim) %>% # Sets seed
+  mutate(d    = map(seed, sim_d, n = 125)) %>% # Generates simulated data
+  mutate(logmemrankb.promprev.str.mlm  = map2(d, seed, ~update(logmemrankb.promprev.str.mlm, newdata = .x, seed = .y, cores = 4))) # Reruns model with simulated data
+
+# Define end time and beep so we know it's done
+t2 <- Sys.time()
+beep(2)
+
+# Calculate runtime
+t2 - t1
+
+# Quantify how many of the intervals indicate that there's more than a 95% probability the null hypothesis is not credible
+power <- powersims_125n_100sims %>% 
+  mutate(rfprom = map(logmemrankb.promprev.str.mlm, tidy, prob = .95)) %>% 
+  unnest(rfprom) %>% 
+  filter(term == "b_rf.e:prom.strcs") %>% 
+  mutate(check = ifelse(lower > 0 | upper < 0, 1, 0)) %>% 
+  summarise(power = mean(check))
+power
+
+# n = 100 with 100 simulations: power = 76%
+# n = 125 with 100 simulations: power = 93%
+
+# Visualize results
+powerplot <- powersims_125n_100sims %>% 
+  mutate(rfprom = map(logmemrankb.promprev.str.mlm, tidy, prob = .95)) %>% 
+  unnest(rfprom) %>% 
+  filter(term == "b_rf.e:prom.strcs") %>% 
+  ggplot(aes(x = seed, y = estimate, ymin = lower, ymax = upper)) +
+  geom_hline(yintercept = c(0, fixef(logmemrankb.promprev.str.mlm)["rf.e:prom.strcs","Estimate"]), color = "gray") +
+  geom_pointrange(fatten = 1/2) +
+  labs(x = "Seed (i.e., Simulation Index)",
+       y = "Effect of Interest (rf.e:prom.strcs)")
+powerplot
+```
